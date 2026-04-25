@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,16 +16,18 @@ import (
 )
 
 type Server struct {
-	agent  *runtime.Agent
-	logger *slog.Logger
-	mux    *http.ServeMux
+	agent   *runtime.Agent
+	logger  *slog.Logger
+	mux     *http.ServeMux
+	uploads *imageUploadStore
 }
 
 func NewServer(agent *runtime.Agent, logger *slog.Logger) *Server {
 	server := &Server{
-		agent:  agent,
-		logger: logger,
-		mux:    http.NewServeMux(),
+		agent:   agent,
+		logger:  logger,
+		mux:     http.NewServeMux(),
+		uploads: newImageUploadStore(),
 	}
 	server.routes()
 	return server
@@ -42,6 +45,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/sessions/", s.handleSessionByID)
 	s.mux.HandleFunc("/api/v1/approvals", s.handleApprovals)
 	s.mux.HandleFunc("/api/v1/approvals/", s.handleApprovalByID)
+	s.mux.HandleFunc("/api/v1/uploads/image", s.handleImageUpload)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +193,11 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		}
 		var request struct {
 			Prompt string `json:"prompt"`
+			Inputs []struct {
+				Type     string `json:"type"`
+				Text     string `json:"text"`
+				UploadID string `json:"uploadId"`
+			} `json:"inputs"`
 		}
 		if !decodeJSON(w, r, &request) {
 			return
@@ -196,7 +205,12 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		turn, err := s.agent.StartTurn(ctx, sessionID, request.Prompt)
+		input, err := s.buildTurnInput(request.Prompt, request.Inputs)
+		if err != nil {
+			writeErrorMessage(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		turn, err := s.agent.StartTurn(ctx, sessionID, input)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err)
 			return
@@ -210,6 +224,11 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			TurnID string `json:"turnId"`
 			Prompt string `json:"prompt"`
+			Inputs []struct {
+				Type     string `json:"type"`
+				Text     string `json:"text"`
+				UploadID string `json:"uploadId"`
+			} `json:"inputs"`
 		}
 		if !decodeJSON(w, r, &request) {
 			return
@@ -217,7 +236,12 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		if err := s.agent.SteerTurn(ctx, sessionID, request.TurnID, request.Prompt); err != nil {
+		input, err := s.buildTurnInput(request.Prompt, request.Inputs)
+		if err != nil {
+			writeErrorMessage(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := s.agent.SteerTurn(ctx, sessionID, request.TurnID, input); err != nil {
 			writeError(w, http.StatusBadGateway, err)
 			return
 		}
@@ -321,6 +345,107 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			_, _ = fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()
 		}
+	}
+}
+
+func (s *Server) handleImageUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if err := r.ParseMultipartForm(maxUploadImageBytes + (1 * 1024 * 1024)); err != nil {
+		writeErrorMessage(w, http.StatusBadRequest, "invalid multipart form payload")
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeErrorMessage(w, http.StatusBadRequest, "missing image file in multipart field 'file'")
+		return
+	}
+	defer file.Close()
+
+	payload, err := io.ReadAll(io.LimitReader(file, maxUploadImageBytes+1))
+	if err != nil {
+		writeErrorMessage(w, http.StatusBadRequest, "failed to read uploaded image")
+		return
+	}
+	if len(payload) == 0 {
+		writeErrorMessage(w, http.StatusBadRequest, "uploaded image is empty")
+		return
+	}
+	if len(payload) > maxUploadImageBytes {
+		writeErrorMessage(w, http.StatusBadRequest, "image exceeds 15MB size limit")
+		return
+	}
+	if !strings.HasPrefix(http.DetectContentType(payload), "image/") {
+		writeErrorMessage(w, http.StatusBadRequest, "uploaded file must be an image")
+		return
+	}
+
+	name := strings.TrimSpace(header.Filename)
+	if name == "" {
+		name = "upload-image"
+	}
+	item, err := s.uploads.Save(name, payload)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":   item.ID,
+		"name": item.Name,
+		"size": item.Size,
+	})
+}
+
+func (s *Server) buildTurnInput(
+	legacyPrompt string,
+	inputs []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		UploadID string `json:"uploadId"`
+	},
+) ([]map[string]any, error) {
+	if len(inputs) == 0 {
+		prompt := strings.TrimSpace(legacyPrompt)
+		if prompt == "" {
+			return nil, fmt.Errorf("prompt or inputs is required")
+		}
+		return []map[string]any{composeTextInput(prompt)}, nil
+	}
+
+	result := make([]map[string]any, 0, len(inputs))
+	for _, input := range inputs {
+		switch strings.TrimSpace(input.Type) {
+		case "text":
+			text := strings.TrimSpace(input.Text)
+			if text == "" {
+				return nil, fmt.Errorf("text input cannot be empty")
+			}
+			result = append(result, composeTextInput(text))
+		case "image":
+			path, err := s.uploads.Resolve(input.UploadID)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, map[string]any{
+				"type": "localImage",
+				"path": path,
+			})
+		default:
+			return nil, fmt.Errorf("unsupported input type %q", input.Type)
+		}
+	}
+	return result, nil
+}
+
+func composeTextInput(prompt string) map[string]any {
+	return map[string]any{
+		"type":          "text",
+		"text":          prompt,
+		"text_elements": []any{},
 	}
 }
 

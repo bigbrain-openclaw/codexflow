@@ -175,13 +175,14 @@ class AppModel extends ChangeNotifier {
     }
   }
 
-  Future<void> submitPrompt({
+  Future<bool> submitPrompt({
     required SessionSummary session,
     required String prompt,
+    List<String> imageUploadIds = const <String>[],
   }) async {
     final trimmed = prompt.trim();
-    if (trimmed.isEmpty) {
-      return;
+    if (trimmed.isEmpty && imageUploadIds.isEmpty) {
+      return false;
     }
 
     try {
@@ -191,18 +192,36 @@ class AppModel extends ChangeNotifier {
           sessionId: session.id,
           turnId: session.lastTurnId,
           prompt: trimmed,
+          imageUploadIds: imageUploadIds,
         );
       } else {
         await _client().startTurn(
           sessionId: session.id,
           prompt: trimmed,
+          imageUploadIds: imageUploadIds,
         );
       }
       await refreshDashboard();
       await loadSession(session.id);
+      return true;
     } catch (error) {
       connectionError = error.toString();
       notifyListeners();
+      return false;
+    }
+  }
+
+  Future<UploadedImageRef?> uploadImage({
+    required Uint8List bytes,
+    required String fileName,
+  }) async {
+    try {
+      final ref = await _client().uploadImage(bytes: bytes, fileName: fileName);
+      return ref;
+    } catch (error) {
+      connectionError = error.toString();
+      notifyListeners();
+      return null;
     }
   }
 

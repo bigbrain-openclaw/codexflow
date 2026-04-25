@@ -251,6 +251,12 @@ struct ApprovalListEnvelope: Codable {
   let data: [PendingRequestView]
 }
 
+struct UploadedImageRef: Codable, Hashable, Identifiable {
+  let id: String
+  let name: String
+  let size: Int64
+}
+
 enum JSONValue: Codable, Hashable {
   case string(String)
   case number(Double)

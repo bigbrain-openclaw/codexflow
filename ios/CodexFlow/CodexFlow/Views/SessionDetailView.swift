@@ -1,10 +1,15 @@
 import SwiftUI
+import PhotosUI
+import UIKit
 
 struct SessionDetailView: View {
   @EnvironmentObject private var model: AppModel
   let sessionID: String
 
   @State private var prompt = ""
+  @State private var selectedPhotoItem: PhotosPickerItem?
+  @State private var attachments: [ComposerAttachment] = []
+  @State private var isUploadingImage = false
   @FocusState private var isPromptFocused: Bool
 
   private var detail: SessionDetail? {
@@ -17,6 +22,10 @@ struct SessionDetailView: View {
 
   private var trimmedPrompt: String {
     prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private var canSubmit: Bool {
+    !trimmedPrompt.isEmpty || !attachments.isEmpty
   }
 
   private var orderedTurns: [TurnDetail] {
@@ -133,6 +142,12 @@ struct SessionDetailView: View {
         await refreshSessionPage()
       }
     }
+    .onChange(of: selectedPhotoItem) { item in
+      guard let item else { return }
+      Task {
+        await loadAndUploadPhoto(item)
+      }
+    }
     .navigationTitle(summary?.displayName ?? "会话详情")
     .navigationBarTitleDisplayMode(.inline)
     .toolbar(.visible, for: .navigationBar)
@@ -147,6 +162,25 @@ struct SessionDetailView: View {
           await refreshSessionPage()
         }
       }
+    }
+  }
+
+  private func loadAndUploadPhoto(_ item: PhotosPickerItem) async {
+    isUploadingImage = true
+    defer {
+      isUploadingImage = false
+      selectedPhotoItem = nil
+    }
+
+    do {
+      guard let data = try await item.loadTransferable(type: Data.self), let image = UIImage(data: data) else {
+        model.connectionError = "选中的图片无法读取。"
+        return
+      }
+      let ref = try await model.uploadImage(data: data, fileName: "attachment.jpg")
+      attachments.append(ComposerAttachment(uploadID: ref.id, image: image, fileName: ref.name))
+    } catch {
+      model.connectionError = error.localizedDescription
     }
   }
 
@@ -282,6 +316,63 @@ struct SessionDetailView: View {
           .font(.system(.footnote, design: .rounded))
           .foregroundStyle(Palette.mutedInk)
 
+        HStack(spacing: 8) {
+          PhotosPicker(selection: $selectedPhotoItem, matching: .images, photoLibrary: .shared()) {
+            HStack(spacing: 6) {
+              Image(systemName: "photo")
+                .font(.system(size: 13, weight: .semibold))
+              Text(isUploadingImage ? "上传中…" : "添加图片")
+                .font(.system(.footnote, design: .rounded, weight: .semibold))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Palette.shell)
+            .foregroundStyle(Palette.ink)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+              RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Palette.line, lineWidth: 1)
+            }
+          }
+          .disabled(isUploadingImage)
+
+          if !attachments.isEmpty {
+            Text("已选 \(attachments.count) 张")
+              .font(.system(.caption, design: .rounded, weight: .medium))
+              .foregroundStyle(Palette.mutedInk)
+          }
+        }
+
+        if !attachments.isEmpty {
+          ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+              ForEach(attachments) { attachment in
+                ZStack(alignment: .topTrailing) {
+                  Image(uiImage: attachment.image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 76, height: 76)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay {
+                      RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Palette.line, lineWidth: 1)
+                    }
+
+                  Button {
+                    attachments.removeAll { $0.id == attachment.id }
+                  } label: {
+                    Image(systemName: "xmark.circle.fill")
+                      .font(.system(size: 18, weight: .semibold))
+                      .foregroundStyle(.white, Palette.danger)
+                  }
+                  .offset(x: 6, y: -6)
+                }
+              }
+            }
+            .padding(.vertical, 2)
+          }
+        }
+
         ZStack(alignment: .topLeading) {
           RoundedRectangle(cornerRadius: 16, style: .continuous)
             .fill(Color.clear)
@@ -316,8 +407,15 @@ struct SessionDetailView: View {
           isPromptFocused = false
           dismissKeyboard()
           Task {
-            await model.submitPrompt(for: summary, prompt: trimmedPrompt)
-            prompt = ""
+            let sent = await model.submitPrompt(
+              for: summary,
+              prompt: trimmedPrompt,
+              imageUploadIDs: attachments.map(\.uploadID)
+            )
+            if sent {
+              prompt = ""
+              attachments.removeAll()
+            }
           }
         } label: {
           HStack(spacing: 8) {
@@ -333,8 +431,8 @@ struct SessionDetailView: View {
           .foregroundStyle(.white)
           .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-          .disabled(trimmedPrompt.isEmpty)
-        .opacity(trimmedPrompt.isEmpty ? 0.45 : 1)
+          .disabled(!canSubmit || isUploadingImage)
+        .opacity((!canSubmit || isUploadingImage) ? 0.45 : 1)
 
         if isSteering {
           HStack(spacing: 10) {
@@ -548,6 +646,13 @@ private func normalizedDisplayText(from raw: String) -> String {
     .filter { !$0.isEmpty }
     .joined(separator: " ")
     .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private struct ComposerAttachment: Identifiable {
+  let id = UUID()
+  let uploadID: String
+  let image: UIImage
+  let fileName: String
 }
 
 private struct TurnCard: View {

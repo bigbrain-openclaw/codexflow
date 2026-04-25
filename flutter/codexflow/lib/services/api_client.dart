@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -87,11 +88,15 @@ class ApiClient {
   Future<TurnDetail> startTurn({
     required String sessionId,
     required String prompt,
+    List<String> imageUploadIds = const <String>[],
   }) async {
     final json = await _decodeMap(
       '/api/v1/sessions/$sessionId/turns/start',
       method: 'POST',
-      body: <String, dynamic>{'prompt': prompt},
+      body: <String, dynamic>{
+        'prompt': prompt,
+        'inputs': _buildInputs(prompt: prompt, imageUploadIds: imageUploadIds),
+      },
     );
     return TurnDetail.fromJson(json);
   }
@@ -100,6 +105,7 @@ class ApiClient {
     required String sessionId,
     required String turnId,
     required String prompt,
+    List<String> imageUploadIds = const <String>[],
   }) async {
     await _sendJson(
       '/api/v1/sessions/$sessionId/turns/steer',
@@ -107,6 +113,7 @@ class ApiClient {
       body: <String, dynamic>{
         'turnId': turnId,
         'prompt': prompt,
+        'inputs': _buildInputs(prompt: prompt, imageUploadIds: imageUploadIds),
       },
     );
   }
@@ -131,6 +138,57 @@ class ApiClient {
       method: 'POST',
       body: <String, dynamic>{'result': result},
     );
+  }
+
+  Future<UploadedImageRef> uploadImage({
+    required Uint8List bytes,
+    required String fileName,
+  }) async {
+    final uri = _baseUri.resolve('/api/v1/uploads/image');
+    final request = http.MultipartRequest('POST', uri)
+      ..files.add(
+        http.MultipartFile.fromBytes(
+          'file',
+          bytes,
+          filename: fileName,
+        ),
+      );
+
+    late http.StreamedResponse streamed;
+    try {
+      streamed = await _client.send(request).timeout(const Duration(seconds: 45));
+    } on TimeoutException {
+      throw ApiError('The image upload request timed out.');
+    } catch (error) {
+      throw ApiError(error.toString());
+    }
+
+    final response = await http.Response.fromStream(streamed);
+    dynamic payload;
+    if (response.body.isNotEmpty) {
+      try {
+        payload = jsonDecode(response.body);
+      } catch (_) {
+        payload = response.body;
+      }
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (payload is Map<String, dynamic> && payload['error'] != null) {
+        throw ApiError(asString(payload['error']));
+      }
+      throw ApiError('Request failed with status ${response.statusCode}');
+    }
+
+    if (payload is Map<String, dynamic>) {
+      return UploadedImageRef.fromJson(payload);
+    }
+    if (payload is Map) {
+      final map = payload
+          .map((key, dynamic value) => MapEntry(key.toString(), value));
+      return UploadedImageRef.fromJson(map);
+    }
+    throw ApiError('The agent returned an invalid upload response.');
   }
 
   Future<Map<String, dynamic>> _decodeMap(
@@ -198,5 +256,30 @@ class ApiClient {
     }
 
     return payload;
+  }
+
+  List<Map<String, dynamic>> _buildInputs({
+    required String prompt,
+    required List<String> imageUploadIds,
+  }) {
+    final inputs = <Map<String, dynamic>>[];
+    final trimmed = prompt.trim();
+    if (trimmed.isNotEmpty) {
+      inputs.add(<String, dynamic>{
+        'type': 'text',
+        'text': trimmed,
+      });
+    }
+    for (final id in imageUploadIds) {
+      final trimmedId = id.trim();
+      if (trimmedId.isEmpty) {
+        continue;
+      }
+      inputs.add(<String, dynamic>{
+        'type': 'image',
+        'uploadId': trimmedId,
+      });
+    }
+    return inputs;
   }
 }

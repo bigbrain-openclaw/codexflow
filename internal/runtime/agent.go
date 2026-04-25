@@ -246,7 +246,7 @@ func (a *Agent) StartSession(ctx context.Context, cwd, prompt string) (SessionSu
 	a.store.SetSessionLoaded(threadResp.Thread.ID, true)
 
 	if strings.TrimSpace(prompt) != "" {
-		if _, err := a.StartTurn(ctx, threadResp.Thread.ID, prompt); err != nil {
+		if _, err := a.StartTurnWithPrompt(ctx, threadResp.Thread.ID, prompt); err != nil {
 			return SessionSummary{}, err
 		}
 	}
@@ -325,11 +325,19 @@ func (a *Agent) ArchiveSession(ctx context.Context, threadID string) error {
 	return nil
 }
 
-func (a *Agent) StartTurn(ctx context.Context, threadID, prompt string) (TurnDetail, error) {
+func (a *Agent) StartTurnWithPrompt(ctx context.Context, threadID, prompt string) (TurnDetail, error) {
+	return a.StartTurn(ctx, threadID, []map[string]any{textInput(prompt)})
+}
+
+func (a *Agent) StartTurn(ctx context.Context, threadID string, input []map[string]any) (TurnDetail, error) {
+	if len(input) == 0 {
+		return TurnDetail{}, errors.New("turn input is required")
+	}
+
 	var response codex.TurnStartResponse
 	if err := a.client.Call(ctx, "turn/start", map[string]any{
 		"threadId": threadID,
-		"input":    []map[string]any{textInput(prompt)},
+		"input":    input,
 	}, &response); err != nil {
 		return TurnDetail{}, err
 	}
@@ -350,12 +358,20 @@ func (a *Agent) StartTurn(ctx context.Context, threadID, prompt string) (TurnDet
 	return TurnDetail{}, errors.New("turn not found after start")
 }
 
-func (a *Agent) SteerTurn(ctx context.Context, threadID, turnID, prompt string) error {
+func (a *Agent) SteerTurnWithPrompt(ctx context.Context, threadID, turnID, prompt string) error {
+	return a.SteerTurn(ctx, threadID, turnID, []map[string]any{textInput(prompt)})
+}
+
+func (a *Agent) SteerTurn(ctx context.Context, threadID, turnID string, input []map[string]any) error {
+	if len(input) == 0 {
+		return errors.New("turn input is required")
+	}
+
 	var response codex.TurnSteerResponse
 	if err := a.client.Call(ctx, "turn/steer", map[string]any{
 		"threadId":       threadID,
 		"expectedTurnId": turnID,
-		"input":          []map[string]any{textInput(prompt)},
+		"input":          input,
 	}, &response); err != nil {
 		return err
 	}

@@ -120,21 +120,40 @@ final class AppModel: ObservableObject {
     }
   }
 
-  func submitPrompt(for session: SessionSummary, prompt: String) async {
-    guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+  func submitPrompt(for session: SessionSummary, prompt: String, imageUploadIDs: [String] = []) async -> Bool {
+    let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmedPrompt.isEmpty && imageUploadIDs.isEmpty {
+      return false
+    }
 
     do {
       let client = try APIClient(baseURLString: baseURLString)
       if session.lastTurnStatus == "inProgress" && !session.lastTurnId.isEmpty {
-        try await client.steerTurn(sessionID: session.id, turnID: session.lastTurnId, prompt: prompt)
+        try await client.steerTurn(
+          sessionID: session.id,
+          turnID: session.lastTurnId,
+          prompt: trimmedPrompt,
+          imageUploadIDs: imageUploadIDs
+        )
       } else {
-        _ = try await client.startTurn(sessionID: session.id, prompt: prompt)
+        _ = try await client.startTurn(
+          sessionID: session.id,
+          prompt: trimmedPrompt,
+          imageUploadIDs: imageUploadIDs
+        )
       }
       await refreshDashboard()
       await loadSession(session)
+      return true
     } catch {
       connectionError = error.localizedDescription
+      return false
     }
+  }
+
+  func uploadImage(data: Data, fileName: String) async throws -> UploadedImageRef {
+    let client = try APIClient(baseURLString: baseURLString)
+    return try await client.uploadImage(data: data, fileName: fileName)
   }
 
   func interrupt(session: SessionSummary) async {

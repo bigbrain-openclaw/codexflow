@@ -64,6 +64,26 @@ DateTime parseDateTime(Object? value) {
       DateTime.fromMillisecondsSinceEpoch(0);
 }
 
+class UploadedImageRef {
+  UploadedImageRef({
+    required this.id,
+    required this.name,
+    required this.size,
+  });
+
+  final String id;
+  final String name;
+  final int size;
+
+  factory UploadedImageRef.fromJson(Map<String, dynamic> json) {
+    return UploadedImageRef(
+      id: asString(json['id']),
+      name: asString(json['name']),
+      size: asInt(json['size']),
+    );
+  }
+}
+
 class DashboardResponse {
   DashboardResponse({
     required this.agent,

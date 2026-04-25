@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../models/app_models.dart';
@@ -10,10 +12,7 @@ import '../widgets/common.dart';
 import 'approval_screen.dart';
 
 class SessionDetailScreen extends StatefulWidget {
-  const SessionDetailScreen({
-    super.key,
-    required this.sessionId,
-  });
+  const SessionDetailScreen({super.key, required this.sessionId});
 
   final String sessionId;
 
@@ -25,6 +24,9 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
   late final TextEditingController _promptController;
   Timer? _timer;
   int _tick = 0;
+  bool _isUploadingImage = false;
+  final ImagePicker _imagePicker = ImagePicker();
+  final List<_ComposerAttachment> _attachments = <_ComposerAttachment>[];
 
   @override
   void initState() {
@@ -32,8 +34,10 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     _promptController = TextEditingController();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_refreshSessionPage());
-      _timer =
-          Timer.periodic(const Duration(seconds: 2), (_) => _pollIfNeeded());
+      _timer = Timer.periodic(
+        const Duration(seconds: 2),
+        (_) => _pollIfNeeded(),
+      );
     });
   }
 
@@ -53,9 +57,9 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
       return detail.summary;
     }
     return model.dashboard.sessions.cast<SessionSummary?>().firstWhere(
-          (session) => session?.id == widget.sessionId,
-          orElse: () => null,
-        );
+      (session) => session?.id == widget.sessionId,
+      orElse: () => null,
+    );
   }
 
   List<PendingRequestView> _sessionApprovals(AppModel model) =>
@@ -95,30 +99,81 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     await model.loadSession(widget.sessionId);
   }
 
+  Future<void> _pickAndUploadImage() async {
+    if (_isUploadingImage) {
+      return;
+    }
+
+    final image = await _imagePicker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 90,
+    );
+    if (image == null) {
+      return;
+    }
+
+    final bytes = await image.readAsBytes();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _isUploadingImage = true;
+    });
+    try {
+      final model = context.read<AppModel>();
+      final uploaded = await model.uploadImage(
+        bytes: bytes,
+        fileName: image.name.isEmpty ? 'attachment.jpg' : image.name,
+      );
+      if (!mounted || uploaded == null) {
+        return;
+      }
+      setState(() {
+        _attachments.add(
+          _ComposerAttachment(
+            id: '${DateTime.now().microsecondsSinceEpoch}-${uploaded.id}',
+            uploadId: uploaded.id,
+            name: uploaded.name,
+            bytes: bytes,
+          ),
+        );
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUploadingImage = false;
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final model = context.watch<AppModel>();
     final detail = _detail(model);
     final summary = _summary(model);
-    final orderedTurns =
-        detail == null ? const <TurnDetail>[] : detail.turns.reversed.toList();
+    final orderedTurns = detail == null
+        ? const <TurnDetail>[]
+        : detail.turns.reversed.toList();
     final activeTurn = orderedTurns.cast<TurnDetail?>().firstWhere(
-          (turn) => turn?.status == 'inProgress',
-          orElse: () => null,
-        );
-    final recentTurns =
-        orderedTurns.where((turn) => turn.id != activeTurn?.id).toList();
+      (turn) => turn?.status == 'inProgress',
+      orElse: () => null,
+    );
+    final recentTurns = orderedTurns
+        .where((turn) => turn.id != activeTurn?.id)
+        .toList();
     final sessionApprovals = _sessionApprovals(model);
     final activeTurnApprovals = activeTurn == null
         ? const <PendingRequestView>[]
         : sessionApprovals
-            .where((approval) => approval.turnId == activeTurn.id)
-            .toList();
+              .where((approval) => approval.turnId == activeTurn.id)
+              .toList();
     final remainingSessionApprovals = activeTurn == null
         ? sessionApprovals
         : sessionApprovals
-            .where((approval) => approval.turnId != activeTurn.id)
-            .toList();
+              .where((approval) => approval.turnId != activeTurn.id)
+              .toList();
 
     return Scaffold(
       backgroundColor: Palette.canvas,
@@ -149,15 +204,18 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                             Text(
                               '当前会话待审批',
                               style: roundedTextStyle(
-                                  size: 16, weight: FontWeight.w600),
+                                size: 16,
+                                weight: FontWeight.w600,
+                              ),
                             ),
                             const SizedBox(width: 8),
                             Text(
                               '${remainingSessionApprovals.length}',
                               style: roundedTextStyle(
-                                  size: 12,
-                                  weight: FontWeight.w600,
-                                  color: Palette.mutedInk),
+                                size: 12,
+                                weight: FontWeight.w600,
+                                color: Palette.mutedInk,
+                              ),
                             ),
                           ],
                         ),
@@ -183,11 +241,28 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                   _ComposerCard(
                     summary: summary,
                     promptController: _promptController,
+                    attachments: _attachments,
+                    isUploadingImage: _isUploadingImage,
+                    onPickImage: _pickAndUploadImage,
+                    onRemoveAttachment: (String id) {
+                      setState(() {
+                        _attachments.removeWhere((item) => item.id == id);
+                      });
+                    },
                     onSubmit: () async {
-                      final prompt = _promptController.text.trim();
-                      await model.submitPrompt(
-                          session: summary, prompt: prompt);
-                      _promptController.clear();
+                      final sent = await model.submitPrompt(
+                        session: summary,
+                        prompt: _promptController.text.trim(),
+                        imageUploadIds: _attachments
+                            .map((item) => item.uploadId)
+                            .toList(),
+                      );
+                      if (sent) {
+                        _promptController.clear();
+                        setState(() {
+                          _attachments.clear();
+                        });
+                      }
                     },
                     onInterrupt: summary.lastTurnStatus == 'inProgress'
                         ? () async {
@@ -208,17 +283,20 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                     child: Text(
                       _emptyStateMessage(summary),
                       style: roundedTextStyle(
-                          size: 13,
-                          weight: FontWeight.w500,
-                          color: Palette.mutedInk),
+                        size: 13,
+                        weight: FontWeight.w500,
+                        color: Palette.mutedInk,
+                      ),
                     ),
                   )
                 else ...<Widget>[
                   if (activeTurn != null) ...<Widget>[
                     Text(
                       '当前运行中',
-                      style:
-                          roundedTextStyle(size: 16, weight: FontWeight.w600),
+                      style: roundedTextStyle(
+                        size: 16,
+                        weight: FontWeight.w600,
+                      ),
                     ),
                     const SizedBox(height: 10),
                     ActiveTurnCard(
@@ -230,14 +308,18 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                   if (recentTurns.isNotEmpty) ...<Widget>[
                     Text(
                       '最近的 turn',
-                      style:
-                          roundedTextStyle(size: 16, weight: FontWeight.w600),
+                      style: roundedTextStyle(
+                        size: 16,
+                        weight: FontWeight.w600,
+                      ),
                     ),
                     const SizedBox(height: 10),
-                    ...recentTurns.map((turn) => Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: TurnCard(turn: turn),
-                        )),
+                    ...recentTurns.map(
+                      (turn) => Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: TurnCard(turn: turn),
+                      ),
+                    ),
                   ],
                 ],
               ] else
@@ -257,9 +339,10 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                       Text(
                         '正在加载会话详情…',
                         style: roundedTextStyle(
-                            size: 13,
-                            weight: FontWeight.w500,
-                            color: Palette.mutedInk),
+                          size: 13,
+                          weight: FontWeight.w500,
+                          color: Palette.mutedInk,
+                        ),
                       ),
                     ],
                   ),
@@ -283,9 +366,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
 }
 
 class _SummaryCard extends StatelessWidget {
-  const _SummaryCard({
-    required this.summary,
-  });
+  const _SummaryCard({required this.summary});
 
   final SessionSummary summary;
 
@@ -294,8 +375,8 @@ class _SummaryCard extends StatelessWidget {
     final stateTone = summary.isEnded
         ? Palette.mutedInk
         : (summary.pendingApprovals > 0
-            ? Palette.warning
-            : (summary.loaded ? Palette.success : Palette.softBlue));
+              ? Palette.warning
+              : (summary.loaded ? Palette.success : Palette.softBlue));
 
     return PanelCard(
       child: Column(
@@ -310,8 +391,10 @@ class _SummaryCard extends StatelessWidget {
                   children: <Widget>[
                     Text(
                       summary.displayName,
-                      style:
-                          roundedTextStyle(size: 16, weight: FontWeight.w600),
+                      style: roundedTextStyle(
+                        size: 16,
+                        weight: FontWeight.w600,
+                      ),
                     ),
                     const SizedBox(height: 5),
                     Text(
@@ -344,8 +427,9 @@ class _SummaryCard extends StatelessWidget {
                 CapsuleTag(title: '来源', value: summary.source),
                 const SizedBox(width: 8),
                 CapsuleTag(
-                    title: '分支',
-                    value: summary.branch.isEmpty ? '未识别' : summary.branch),
+                  title: '分支',
+                  value: summary.branch.isEmpty ? '未识别' : summary.branch,
+                ),
                 const SizedBox(width: 8),
                 CapsuleTag(title: '模型', value: summary.modelProvider),
               ],
@@ -357,7 +441,10 @@ class _SummaryCard extends StatelessWidget {
             Text(
               '首条消息',
               style: roundedTextStyle(
-                  size: 12, weight: FontWeight.w600, color: Palette.mutedInk),
+                size: 12,
+                weight: FontWeight.w600,
+                color: Palette.mutedInk,
+              ),
             ),
             const SizedBox(height: 4),
             HeadTailExcerptBlock(
@@ -365,10 +452,11 @@ class _SummaryCard extends StatelessWidget {
               head: 170,
               tail: 110,
               style: roundedTextStyle(
-                  size: 13,
-                  weight: FontWeight.w500,
-                  color: Palette.mutedInk,
-                  height: 1.45),
+                size: 13,
+                weight: FontWeight.w500,
+                color: Palette.mutedInk,
+                height: 1.45,
+              ),
             ),
           ],
           if (summary.pendingApprovals > 0) ...<Widget>[
@@ -376,10 +464,11 @@ class _SummaryCard extends StatelessWidget {
             Text(
               '这个会话当前有 ${summary.pendingApprovals} 个审批等待处理，你可以直接在下面处理，也可以去“审批”页集中处理。',
               style: roundedTextStyle(
-                  size: 13,
-                  weight: FontWeight.w500,
-                  color: Palette.warning,
-                  height: 1.45),
+                size: 13,
+                weight: FontWeight.w500,
+                color: Palette.warning,
+                height: 1.45,
+              ),
             ),
           ],
           const SizedBox(height: 12),
@@ -405,10 +494,11 @@ class _SummaryCard extends StatelessWidget {
                   child: Text(
                     _actionSummary(summary),
                     style: roundedTextStyle(
-                        size: 13,
-                        weight: FontWeight.w500,
-                        color: stateTone,
-                        height: 1.45),
+                      size: 13,
+                      weight: FontWeight.w500,
+                      color: stateTone,
+                      height: 1.45,
+                    ),
                   ),
                 ),
               ],
@@ -437,10 +527,7 @@ class _SummaryCard extends StatelessWidget {
 }
 
 class _TakeoverCard extends StatelessWidget {
-  const _TakeoverCard({
-    required this.summary,
-    required this.onPressed,
-  });
+  const _TakeoverCard({required this.summary, required this.onPressed});
 
   final SessionSummary summary;
   final Future<void> Function() onPressed;
@@ -465,10 +552,11 @@ class _TakeoverCard extends StatelessWidget {
           Text(
             _takeoverSummary(summary),
             style: roundedTextStyle(
-                size: 13,
-                weight: FontWeight.w500,
-                color: Palette.mutedInk,
-                height: 1.45),
+              size: 13,
+              weight: FontWeight.w500,
+              color: Palette.mutedInk,
+              height: 1.45,
+            ),
           ),
           const SizedBox(height: 12),
           ActionButton(
@@ -494,10 +582,28 @@ class _TakeoverCard extends StatelessWidget {
   }
 }
 
+class _ComposerAttachment {
+  _ComposerAttachment({
+    required this.id,
+    required this.uploadId,
+    required this.name,
+    required this.bytes,
+  });
+
+  final String id;
+  final String uploadId;
+  final String name;
+  final Uint8List bytes;
+}
+
 class _ComposerCard extends StatelessWidget {
   const _ComposerCard({
     required this.summary,
     required this.promptController,
+    required this.attachments,
+    required this.isUploadingImage,
+    required this.onPickImage,
+    required this.onRemoveAttachment,
     required this.onSubmit,
     required this.onInterrupt,
     required this.onEnd,
@@ -505,6 +611,10 @@ class _ComposerCard extends StatelessWidget {
 
   final SessionSummary summary;
   final TextEditingController promptController;
+  final List<_ComposerAttachment> attachments;
+  final bool isUploadingImage;
+  final Future<void> Function() onPickImage;
+  final void Function(String id) onRemoveAttachment;
   final Future<void> Function() onSubmit;
   final Future<void> Function()? onInterrupt;
   final Future<void> Function() onEnd;
@@ -517,6 +627,7 @@ class _ComposerCard extends StatelessWidget {
       listenable: promptController,
       builder: (BuildContext context, Widget? child) {
         final trimmedPrompt = promptController.text.trim();
+        final canSubmit = trimmedPrompt.isNotEmpty || attachments.isNotEmpty;
         return PanelCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -531,7 +642,10 @@ class _ComposerCard extends StatelessWidget {
                   Text(
                     isSteering ? 'steer' : 'new turn',
                     style: roundedTextStyle(
-                        size: 11, weight: FontWeight.w700, color: accentTone),
+                      size: 11,
+                      weight: FontWeight.w700,
+                      color: accentTone,
+                    ),
                   ),
                 ],
               ),
@@ -539,13 +653,112 @@ class _ComposerCard extends StatelessWidget {
               Text(
                 isSteering ? '补充调整方向或新增约束。' : '输入新的 prompt，继续这个会话。',
                 style: roundedTextStyle(
-                    size: 13, weight: FontWeight.w500, color: Palette.mutedInk),
+                  size: 13,
+                  weight: FontWeight.w500,
+                  color: Palette.mutedInk,
+                ),
               ),
+              const SizedBox(height: 12),
+              Row(
+                children: <Widget>[
+                  Opacity(
+                    opacity: isUploadingImage ? 0.45 : 1,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(10),
+                      onTap: isUploadingImage ? null : onPickImage,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Palette.shell,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Palette.line),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            const Icon(
+                              Icons.photo,
+                              size: 14,
+                              color: Palette.ink,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              isUploadingImage ? '上传中…' : '添加图片',
+                              style: roundedTextStyle(
+                                size: 12,
+                                weight: FontWeight.w600,
+                                color: Palette.ink,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  if (attachments.isNotEmpty)
+                    Text(
+                      '已选 ${attachments.length} 张',
+                      style: roundedTextStyle(
+                        size: 12,
+                        weight: FontWeight.w600,
+                        color: Palette.mutedInk,
+                      ),
+                    ),
+                ],
+              ),
+              if (attachments.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 10),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: attachments
+                        .map(
+                          (attachment) => Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: <Widget>[
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(10),
+                                  child: Image.memory(
+                                    attachment.bytes,
+                                    width: 76,
+                                    height: 76,
+                                    fit: BoxFit.cover,
+                                  ),
+                                ),
+                                Positioned(
+                                  right: -6,
+                                  top: -6,
+                                  child: InkWell(
+                                    onTap: () =>
+                                        onRemoveAttachment(attachment.id),
+                                    borderRadius: BorderRadius.circular(12),
+                                    child: const Icon(
+                                      Icons.cancel,
+                                      size: 20,
+                                      color: Palette.danger,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        )
+                        .toList(),
+                  ),
+                ),
+              ],
               const SizedBox(height: 12),
               CodexTextField(
                 controller: promptController,
-                hintText:
-                    isSteering ? '例如：先别改接口，优先把测试补齐。' : '例如：继续实现剩余部分，并补上验证。',
+                hintText: isSteering
+                    ? '例如：先别改接口，优先把测试补齐。'
+                    : '例如：继续实现剩余部分，并补上验证。',
                 maxLines: 6,
                 minLines: 6,
                 autocapitalization: TextCapitalization.sentences,
@@ -557,7 +770,7 @@ class _ComposerCard extends StatelessWidget {
                 foreground: Colors.white,
                 icon: isSteering ? Icons.alt_route : Icons.auto_awesome,
                 fontSize: 14,
-                enabled: trimmedPrompt.isNotEmpty,
+                enabled: canSubmit && !isUploadingImage,
                 onPressed: () async {
                   FocusScope.of(context).unfocus();
                   await onSubmit();
@@ -622,11 +835,7 @@ class _ComposerCard extends StatelessWidget {
 }
 
 class TurnCard extends StatelessWidget {
-  const TurnCard({
-    super.key,
-    required this.turn,
-    this.isLive = false,
-  });
+  const TurnCard({super.key, required this.turn, this.isLive = false});
 
   final TurnDetail turn;
   final bool isLive;
@@ -638,7 +847,9 @@ class TurnCard extends StatelessWidget {
           ? BoxDecoration(
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
-                  color: Palette.warning.appOpacity(0.35), width: 1.5),
+                color: Palette.warning.appOpacity(0.35),
+                width: 1.5,
+              ),
             )
           : null,
       child: PanelCard(
@@ -664,8 +875,7 @@ class ActiveTurnCard extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(16),
-        border:
-            Border.all(color: Palette.warning.appOpacity(0.35), width: 1.5),
+        border: Border.all(color: Palette.warning.appOpacity(0.35), width: 1.5),
       ),
       child: PanelCard(
         compact: true,
@@ -675,35 +885,42 @@ class ActiveTurnCard extends StatelessWidget {
             if (approvals.isNotEmpty) ...<Widget>[
               Row(
                 children: <Widget>[
-                  const Icon(Icons.warning_rounded,
-                      color: Palette.warning, size: 16),
+                  const Icon(
+                    Icons.warning_rounded,
+                    color: Palette.warning,
+                    size: 16,
+                  ),
                   const SizedBox(width: 8),
                   Text(
                     '当前 turn 待审批',
                     style: roundedTextStyle(
-                        size: 14,
-                        weight: FontWeight.w600,
-                        color: Palette.warning),
+                      size: 14,
+                      weight: FontWeight.w600,
+                      color: Palette.warning,
+                    ),
                   ),
                   const SizedBox(width: 8),
                   Text(
                     '${approvals.length}',
                     style: roundedTextStyle(
-                        size: 12,
-                        weight: FontWeight.w700,
-                        color: Palette.warning),
+                      size: 12,
+                      weight: FontWeight.w700,
+                      color: Palette.warning,
+                    ),
                   ),
                 ],
               ),
               const SizedBox(height: 10),
-              ...approvals.map((approval) => Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: ApprovalCardBody(
-                      approval: approval,
-                      showSessionLabel: false,
-                      embedded: true,
-                    ),
-                  )),
+              ...approvals.map(
+                (approval) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: ApprovalCardBody(
+                    approval: approval,
+                    showSessionLabel: false,
+                    embedded: true,
+                  ),
+                ),
+              ),
               Container(height: 1, color: Palette.line),
               const SizedBox(height: 12),
             ],
@@ -716,11 +933,7 @@ class ActiveTurnCard extends StatelessWidget {
 }
 
 class TurnCardBody extends StatelessWidget {
-  const TurnCardBody({
-    super.key,
-    required this.turn,
-    required this.isLive,
-  });
+  const TurnCardBody({super.key, required this.turn, required this.isLive});
 
   final TurnDetail turn;
   final bool isLive;
@@ -728,14 +941,13 @@ class TurnCardBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final firstUserItem = turn.items.cast<TurnItem?>().firstWhere(
-          (item) => item?.type == 'userMessage' && item!.body.trim().isNotEmpty,
-          orElse: () => null,
-        );
+      (item) => item?.type == 'userMessage' && item!.body.trim().isNotEmpty,
+      orElse: () => null,
+    );
     final lastAgentItem = turn.items.reversed.cast<TurnItem?>().firstWhere(
-          (item) =>
-              item?.type == 'agentMessage' && item!.body.trim().isNotEmpty,
-          orElse: () => null,
-        );
+      (item) => item?.type == 'agentMessage' && item!.body.trim().isNotEmpty,
+      orElse: () => null,
+    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -752,23 +964,28 @@ class TurnCardBody extends StatelessWidget {
                       Text(
                         _turnStatusLabel(turn.status),
                         style: roundedTextStyle(
-                            size: 14,
-                            weight: FontWeight.w600,
-                            color: _statusTone(turn.status)),
+                          size: 14,
+                          weight: FontWeight.w600,
+                          color: _statusTone(turn.status),
+                        ),
                       ),
                       if (isLive) ...<Widget>[
                         const SizedBox(width: 6),
                         Row(
                           children: <Widget>[
-                            const Icon(Icons.sensors,
-                                size: 12, color: Palette.warning),
+                            const Icon(
+                              Icons.sensors,
+                              size: 12,
+                              color: Palette.warning,
+                            ),
                             const SizedBox(width: 4),
                             Text(
                               '实时更新',
                               style: roundedTextStyle(
-                                  size: 11,
-                                  weight: FontWeight.w600,
-                                  color: Palette.warning),
+                                size: 11,
+                                weight: FontWeight.w600,
+                                color: Palette.warning,
+                              ),
                             ),
                           ],
                         ),
@@ -794,7 +1011,10 @@ class TurnCardBody extends StatelessWidget {
               Text(
                 '${turn.durationMs ~/ 1000}s',
                 style: roundedTextStyle(
-                    size: 12, weight: FontWeight.w600, color: Palette.mutedInk),
+                  size: 12,
+                  weight: FontWeight.w600,
+                  color: Palette.mutedInk,
+                ),
               ),
           ],
         ),
@@ -803,7 +1023,10 @@ class TurnCardBody extends StatelessWidget {
           Text(
             turn.error,
             style: roundedTextStyle(
-                size: 13, weight: FontWeight.w500, color: Palette.danger),
+              size: 13,
+              weight: FontWeight.w500,
+              color: Palette.danger,
+            ),
           ),
         ],
         if (firstUserItem != null || lastAgentItem != null) ...<Widget>[
@@ -936,20 +1159,24 @@ class ExcerptSummaryCard extends StatelessWidget {
               Text(
                 title,
                 style: roundedTextStyle(
-                    size: 11, weight: FontWeight.w600, color: tone),
+                  size: 11,
+                  weight: FontWeight.w600,
+                  color: tone,
+                ),
               ),
             ],
           ),
           const SizedBox(height: 6),
           HeadTailExcerptBlock(
-            raw: raw,
+            raw: _normalizeExcerptText(raw),
             head: head,
             tail: tail,
             style: roundedTextStyle(
-                size: 12,
-                weight: FontWeight.w500,
-                color: Palette.ink,
-                height: 1.45),
+              size: 12,
+              weight: FontWeight.w500,
+              color: Palette.ink,
+              height: 1.45,
+            ),
           ),
         ],
       ),
@@ -957,11 +1184,88 @@ class ExcerptSummaryCard extends StatelessWidget {
   }
 }
 
-class TurnDetailSheet extends StatefulWidget {
-  const TurnDetailSheet({
-    super.key,
-    required this.turn,
+String _normalizeExcerptText(String raw) {
+  var text = raw.trim();
+  if (text.isEmpty) {
+    return '';
+  }
+
+  // Keep visible meaning but remove Markdown syntax noise for card excerpts.
+  text = text.replaceAllMapped(
+    RegExp(r'!\[([^\]]*)\]\([^)]+\)'),
+    (match) => match.group(1) ?? '',
+  );
+  text = text.replaceAllMapped(
+    RegExp(r'\[([^\]]+)\]\([^)]+\)'),
+    (match) => match.group(1) ?? '',
+  );
+  text = text.replaceAllMapped(
+    RegExp(r'^```[^\n]*\n?([\s\S]*?)\n?```$', multiLine: true),
+    (match) => match.group(1) ?? '',
+  );
+  text = text.replaceAllMapped(RegExp(r'```[\s\S]*?```'), (match) {
+    final block = match.group(0) ?? '';
+    return block
+        .replaceAll(RegExp(r'^```[^\n]*\n?'), '')
+        .replaceAll(RegExp(r'\n?```$'), '');
   });
+  text = text.replaceAllMapped(
+    RegExp(r'`([^`]+)`'),
+    (match) => match.group(1) ?? '',
+  );
+  text = text.replaceAll(
+    RegExp(r'^\s{0,3}(#{1,6}\s+|>\s+|[-*+]\s+|\d+\.\s+)', multiLine: true),
+    '',
+  );
+  text = text.replaceAll(RegExp(r'^\s*([-*_]\s*){3,}$', multiLine: true), '');
+  text = text.replaceAll(RegExp(r'\\([\\`*_{}\[\]()#+\-.!|>~])'), r'$1');
+
+  // Repeatedly strip paired inline markers so nested combinations are handled.
+  for (var i = 0; i < 4; i++) {
+    final before = text;
+    text = text.replaceAllMapped(
+      RegExp(r'\*\*\*([^*\n]+)\*\*\*'),
+      (match) => match.group(1) ?? '',
+    );
+    text = text.replaceAllMapped(
+      RegExp(r'___([^_\n]+)___'),
+      (match) => match.group(1) ?? '',
+    );
+    text = text.replaceAllMapped(
+      RegExp(r'\*\*([^*\n]+)\*\*'),
+      (match) => match.group(1) ?? '',
+    );
+    text = text.replaceAllMapped(
+      RegExp(r'__([^_\n]+)__'),
+      (match) => match.group(1) ?? '',
+    );
+    text = text.replaceAllMapped(
+      RegExp(r'~~([^~\n]+)~~'),
+      (match) => match.group(1) ?? '',
+    );
+    text = text.replaceAllMapped(
+      RegExp(r'\*([^*\n]+)\*'),
+      (match) => match.group(1) ?? '',
+    );
+    text = text.replaceAllMapped(
+      RegExp(r'_([^_\n]+)_'),
+      (match) => match.group(1) ?? '',
+    );
+    if (text == before) {
+      break;
+    }
+  }
+
+  text = text.replaceAll(RegExp(r'(^|\s)[*_~]+'), ' ');
+  text = text.replaceAll(RegExp(r'[*_~]+(?=\s|$)'), '');
+  text = text.replaceAll('|', ' ');
+  text = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  return text;
+}
+
+class TurnDetailSheet extends StatefulWidget {
+  const TurnDetailSheet({super.key, required this.turn});
 
   final TurnDetail turn;
 
@@ -1003,9 +1307,13 @@ class _TurnDetailSheetState extends State<TurnDetailSheet> {
                 child: Scaffold(
                   backgroundColor: Colors.transparent,
                   appBar: AppBar(
-                    title: Text('Turn 详情',
-                        style: roundedTextStyle(
-                            size: 17, weight: FontWeight.w600)),
+                    title: Text(
+                      'Turn 详情',
+                      style: roundedTextStyle(
+                        size: 17,
+                        weight: FontWeight.w600,
+                      ),
+                    ),
                     centerTitle: true,
                     actions: <Widget>[
                       TextButton(
@@ -1013,9 +1321,10 @@ class _TurnDetailSheetState extends State<TurnDetailSheet> {
                         child: Text(
                           '关闭',
                           style: roundedTextStyle(
-                              size: 13,
-                              weight: FontWeight.w600,
-                              color: Palette.softBlue),
+                            size: 13,
+                            weight: FontWeight.w600,
+                            color: Palette.softBlue,
+                          ),
                         ),
                       ),
                     ],
@@ -1076,7 +1385,8 @@ class _TurnDetailSheetState extends State<TurnDetailSheet> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: <Widget>[
                                 if (turn
-                                    .planExplanation.isNotEmpty) ...<Widget>[
+                                    .planExplanation
+                                    .isNotEmpty) ...<Widget>[
                                   Text(
                                     turn.planExplanation,
                                     style: roundedTextStyle(
@@ -1143,11 +1453,12 @@ class _TurnDetailSheetState extends State<TurnDetailSheet> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: turn.items
-                                  .map((item) => Padding(
-                                        padding:
-                                            const EdgeInsets.only(bottom: 8),
-                                        child: TimelineEntryView(item: item),
-                                      ))
+                                  .map(
+                                    (item) => Padding(
+                                      padding: const EdgeInsets.only(bottom: 8),
+                                      child: TimelineEntryView(item: item),
+                                    ),
+                                  )
                                   .toList(),
                             ),
                           ),
@@ -1238,8 +1549,10 @@ class DisclosureSection extends StatelessWidget {
             borderRadius: BorderRadius.circular(12),
             child: Row(
               children: <Widget>[
-                Text(title,
-                    style: roundedTextStyle(size: 12, weight: FontWeight.w600)),
+                Text(
+                  title,
+                  style: roundedTextStyle(size: 12, weight: FontWeight.w600),
+                ),
                 const Spacer(),
                 Icon(
                   isExpanded ? Icons.expand_less : Icons.expand_more,
@@ -1249,10 +1562,7 @@ class DisclosureSection extends StatelessWidget {
               ],
             ),
           ),
-          if (isExpanded) ...<Widget>[
-            const SizedBox(height: 8),
-            child,
-          ],
+          if (isExpanded) ...<Widget>[const SizedBox(height: 8), child],
         ],
       ),
     );
@@ -1260,20 +1570,15 @@ class DisclosureSection extends StatelessWidget {
 }
 
 class TimelineEntryView extends StatelessWidget {
-  const TimelineEntryView({
-    super.key,
-    required this.item,
-  });
+  const TimelineEntryView({super.key, required this.item});
 
   final TurnItem item;
 
   @override
   Widget build(BuildContext context) {
-    final bodyPreview = normalizedDisplayText(item.body).headTailTruncated(
-      maxLength: 220,
-      head: 140,
-      tail: 72,
-    );
+    final bodyPreview = normalizedDisplayText(
+      item.body,
+    ).headTailTruncated(maxLength: 220, head: 140, tail: 72);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12),
@@ -1293,9 +1598,10 @@ class TimelineEntryView extends StatelessWidget {
                 Text(
                   item.status,
                   style: roundedTextStyle(
-                      size: 11,
-                      weight: FontWeight.w600,
-                      color: Palette.mutedInk),
+                    size: 11,
+                    weight: FontWeight.w600,
+                    color: Palette.mutedInk,
+                  ),
                 ),
             ],
           ),
@@ -1306,10 +1612,11 @@ class TimelineEntryView extends StatelessWidget {
               head: 170,
               tail: 110,
               style: roundedTextStyle(
-                  size: 12,
-                  weight: FontWeight.w500,
-                  color: Palette.mutedInk,
-                  height: 1.45),
+                size: 12,
+                weight: FontWeight.w500,
+                color: Palette.mutedInk,
+                height: 1.45,
+              ),
             )
           else if (item.type == 'agentMessage')
             MarkdownBodyBlock(raw: item.body)
@@ -1322,10 +1629,11 @@ class TimelineEntryView extends StatelessWidget {
               Text(
                 bodyPreview,
                 style: roundedTextStyle(
-                    size: 12,
-                    weight: FontWeight.w500,
-                    color: Palette.mutedInk,
-                    height: 1.45),
+                  size: 12,
+                  weight: FontWeight.w500,
+                  color: Palette.mutedInk,
+                  height: 1.45,
+                ),
               ),
             if (item.auxiliary.isNotEmpty) ...<Widget>[
               const SizedBox(height: 8),
@@ -1339,10 +1647,7 @@ class TimelineEntryView extends StatelessWidget {
 }
 
 class TimelineTypeTag extends StatelessWidget {
-  const TimelineTypeTag({
-    super.key,
-    required this.item,
-  });
+  const TimelineTypeTag({super.key, required this.item});
 
   final TurnItem item;
 
@@ -1357,8 +1662,11 @@ class TimelineTypeTag extends StatelessWidget {
       ),
       child: Text(
         _label,
-        style:
-            roundedTextStyle(size: 11, weight: FontWeight.w600, color: color),
+        style: roundedTextStyle(
+          size: 11,
+          weight: FontWeight.w600,
+          color: color,
+        ),
       ),
     );
   }
@@ -1393,10 +1701,7 @@ class TimelineTypeTag extends StatelessWidget {
 }
 
 class FileChangeBlock extends StatelessWidget {
-  const FileChangeBlock({
-    super.key,
-    required this.item,
-  });
+  const FileChangeBlock({super.key, required this.item});
 
   final TurnItem item;
 
@@ -1414,7 +1719,10 @@ class FileChangeBlock extends StatelessWidget {
       return Text(
         item.body,
         style: roundedTextStyle(
-            size: 12, weight: FontWeight.w500, color: Palette.mutedInk),
+          size: 12,
+          weight: FontWeight.w500,
+          color: Palette.mutedInk,
+        ),
       );
     }
 
@@ -1429,8 +1737,11 @@ class FileChangeBlock extends StatelessWidget {
               children: <Widget>[
                 const Padding(
                   padding: EdgeInsets.only(top: 2),
-                  child: Icon(Icons.description_outlined,
-                      size: 12, color: Palette.accent2),
+                  child: Icon(
+                    Icons.description_outlined,
+                    size: 12,
+                    color: Palette.accent2,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
@@ -1452,7 +1763,10 @@ class FileChangeBlock extends StatelessWidget {
           Text(
             '… 还有 $hiddenCount 个文件',
             style: roundedTextStyle(
-                size: 11, weight: FontWeight.w500, color: Palette.mutedInk),
+              size: 11,
+              weight: FontWeight.w500,
+              color: Palette.mutedInk,
+            ),
           ),
       ],
     );
@@ -1460,10 +1774,7 @@ class FileChangeBlock extends StatelessWidget {
 }
 
 class CommandExecutionBlock extends StatelessWidget {
-  const CommandExecutionBlock({
-    super.key,
-    required this.item,
-  });
+  const CommandExecutionBlock({super.key, required this.item});
 
   final TurnItem item;
 
@@ -1477,10 +1788,11 @@ class CommandExecutionBlock extends StatelessWidget {
           Text(
             cwd,
             style: roundedTextStyle(
-                size: 11,
-                weight: FontWeight.w500,
-                color: Palette.mutedInk,
-                fontFamily: 'monospace'),
+              size: 11,
+              weight: FontWeight.w500,
+              color: Palette.mutedInk,
+              fontFamily: 'monospace',
+            ),
           ),
           const SizedBox(height: 8),
         ],
@@ -1526,8 +1838,9 @@ class TerminalOutputBlock extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final lines = text.split('\n');
-    final visibleLines =
-        maxVisibleLines == null ? lines : lines.take(maxVisibleLines!).toList();
+    final visibleLines = maxVisibleLines == null
+        ? lines
+        : lines.take(maxVisibleLines!).toList();
     final hiddenLineCount = lines.length - visibleLines.length;
 
     return SingleChildScrollView(
@@ -1543,8 +1856,10 @@ class TerminalOutputBlock extends StatelessWidget {
           children: <Widget>[
             ...visibleLines.map(
               (line) => Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 2,
+                ),
                 child: Text(
                   line.isEmpty ? ' ' : line,
                   style: roundedTextStyle(
@@ -1577,10 +1892,7 @@ class TerminalOutputBlock extends StatelessWidget {
 }
 
 class DiffBlock extends StatelessWidget {
-  const DiffBlock({
-    super.key,
-    required this.diff,
-  });
+  const DiffBlock({super.key, required this.diff});
 
   final String diff;
 
@@ -1603,8 +1915,10 @@ class DiffBlock extends StatelessWidget {
                 .map(
                   (line) => Container(
                     color: _backgroundColor(line),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 2,
+                    ),
                     child: Text(
                       line.isEmpty ? ' ' : line,
                       style: roundedTextStyle(

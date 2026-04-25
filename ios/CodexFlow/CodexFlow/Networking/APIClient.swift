@@ -81,20 +81,32 @@ struct APIClient {
   }
 
   func startTurn(sessionID: String, prompt: String) async throws -> TurnDetail {
+    try await startTurn(sessionID: sessionID, prompt: prompt, imageUploadIDs: [])
+  }
+
+  func startTurn(sessionID: String, prompt: String, imageUploadIDs: [String]) async throws -> TurnDetail {
     try await decode(
       path: "/api/v1/sessions/\(sessionID)/turns/start",
       method: "POST",
-      body: ["prompt": prompt]
+      body: [
+        "prompt": prompt,
+        "inputs": buildInputs(prompt: prompt, imageUploadIDs: imageUploadIDs)
+      ]
     )
   }
 
   func steerTurn(sessionID: String, turnID: String, prompt: String) async throws {
+    try await steerTurn(sessionID: sessionID, turnID: turnID, prompt: prompt, imageUploadIDs: [])
+  }
+
+  func steerTurn(sessionID: String, turnID: String, prompt: String, imageUploadIDs: [String]) async throws {
     _ = try await sendJSON(
       path: "/api/v1/sessions/\(sessionID)/turns/steer",
       method: "POST",
       body: [
         "turnId": turnID,
-        "prompt": prompt
+        "prompt": prompt,
+        "inputs": buildInputs(prompt: prompt, imageUploadIDs: imageUploadIDs)
       ]
     )
   }
@@ -113,6 +125,63 @@ struct APIClient {
       method: "POST",
       body: ["result": result.foundationValue()]
     )
+  }
+
+  func uploadImage(data: Data, fileName: String) async throws -> UploadedImageRef {
+    let endpoint = baseURL.appending(path: "/api/v1/uploads/image")
+    var request = URLRequest(url: endpoint)
+    request.httpMethod = "POST"
+    request.timeoutInterval = 45
+
+    let boundary = "CodexFlowBoundary-\(UUID().uuidString)"
+    request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+    var body = Data()
+    body.append("--\(boundary)\r\n".data(using: .utf8)!)
+    body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n".data(using: .utf8)!)
+    body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+    body.append(data)
+    body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+    request.httpBody = body
+
+    let (responseData, response) = try await URLSession.shared.data(for: request)
+    guard let http = response as? HTTPURLResponse else {
+      throw APIError.invalidResponse
+    }
+    guard (200..<300).contains(http.statusCode) else {
+      if
+        let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+        let message = json["error"] as? String
+      {
+        throw APIError.server(message)
+      }
+      throw APIError.server("Request failed with status \(http.statusCode)")
+    }
+
+    let decoder = JSONDecoder()
+    return try decoder.decode(UploadedImageRef.self, from: responseData)
+  }
+
+  private func buildInputs(prompt: String, imageUploadIDs: [String]) -> [[String: Any]] {
+    var inputs: [[String: Any]] = []
+    let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmedPrompt.isEmpty {
+      inputs.append([
+        "type": "text",
+        "text": trimmedPrompt
+      ])
+    }
+    for id in imageUploadIDs {
+      let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+      if trimmed.isEmpty {
+        continue
+      }
+      inputs.append([
+        "type": "image",
+        "uploadId": trimmed
+      ])
+    }
+    return inputs
   }
 
   private func decode<T: Decodable>(
