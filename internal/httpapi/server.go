@@ -31,7 +31,7 @@ func NewServer(agent *runtime.Agent, logger *slog.Logger) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.withLogging(s.mux)
+	return s.withLogging(s.withCORS(s.mux))
 }
 
 func (s *Server) routes() {
@@ -332,6 +332,26 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin != "" && isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Cache-Control")
+			w.Header().Set("Access-Control-Expose-Headers", "Content-Type")
+		}
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func methodNotAllowed(w http.ResponseWriter) {
 	writeErrorMessage(w, http.StatusMethodNotAllowed, "method not allowed")
 }
@@ -381,4 +401,38 @@ func normalizeCWD(value string) string {
 	}
 
 	return trimmed
+}
+
+func isAllowedOrigin(origin string) bool {
+	override := strings.TrimSpace(os.Getenv("CODEXFLOW_ALLOWED_ORIGINS"))
+	if override != "" {
+		return matchesAllowedOrigins(origin, override)
+	}
+
+	return strings.HasPrefix(origin, "http://localhost:") ||
+		strings.HasPrefix(origin, "http://127.0.0.1:") ||
+		strings.HasPrefix(origin, "http://[::1]:") ||
+		strings.HasPrefix(origin, "https://localhost:") ||
+		strings.HasPrefix(origin, "https://127.0.0.1:") ||
+		strings.HasPrefix(origin, "https://[::1]:") ||
+		strings.HasPrefix(origin, "chrome-extension://")
+}
+
+func matchesAllowedOrigins(origin, raw string) bool {
+	for _, entry := range strings.Split(raw, ",") {
+		pattern := strings.TrimSpace(entry)
+		if pattern == "" {
+			continue
+		}
+		if pattern == "*" || pattern == origin {
+			return true
+		}
+		if strings.HasSuffix(pattern, "*") {
+			prefix := strings.TrimSuffix(pattern, "*")
+			if strings.HasPrefix(origin, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -1,13 +1,14 @@
 # CodexFlow
 
-CodexFlow 是一个面向 Codex CLI 的移动控制台。
+CodexFlow 是一个面向 Codex CLI 的控制台客户端。
 
-它的目标不是“远程看终端”，而是把 Codex 的会话、turn、diff、审批、状态流，整理成一套适合 iPhone 管理的控制平面。
+它的目标不是“远程看终端”，而是把 Codex 的会话、turn、diff、审批、状态流，整理成一套适合手机和轻量客户端管理的控制平面。
 
-当前仓库包含两部分：
+当前仓库包含三部分：
 
-- `Mac Agent`：运行在电脑上的本地服务，负责接入 Codex CLI
+- `Go Agent`：运行在本地电脑上的服务，负责接入 Codex CLI
 - `iOS App`：运行在 iPhone 上的 SwiftUI 客户端，负责监控、审批和继续指挥
+- `Flutter App`：新的跨平台客户端，负责 Android / Web / 桌面端接入同一套 Agent API
 
 ## 工作原理
 
@@ -22,7 +23,7 @@ Codex CLI / codex app-server
         │
         │ JSON-RPC over stdio
         ▼
-Mac Agent
+Go Agent
   - 启动并持有本地 codex app-server
   - 发现已有 session / loaded session
   - 接收通知、diff、plan、审批请求
@@ -30,22 +31,22 @@ Mac Agent
         │
         │ HTTP / SSE
         ▼
-iOS App
-  - 会话总览
-  - 会话详情
-  - 审批中心
+Client Apps
+  - iOS SwiftUI App
+  - Flutter App
+  - 会话总览 / 会话详情 / 审批中心
   - 继续下一步 / steer / interrupt
 ```
 
 这套设计的核心点是：
 
-- `Mac Agent` 负责把 Codex 的原始协议适配成稳定的应用层接口
-- `iOS App` 不直接操纵终端，而是操纵会话本身
+- `Go Agent` 负责把 Codex 的原始协议适配成稳定的应用层接口
+- 客户端不直接操纵终端，而是操纵会话本身
 - “自动发现已有会话”和“受控管理新会话”可以同时存在
 
 ## 当前已实现的功能
 
-### Mac Agent
+### Go Agent
 
 - 直接启动并连接本机 `codex app-server`
 - 自动发现真实的 Codex 历史会话
@@ -69,6 +70,30 @@ iOS App
 - Agent 地址配置
 - 只显示真实数据，不再回退 mock 数据
 
+### Flutter App
+
+- 复用同一套 Agent HTTP API
+- 会话总览页
+- 会话详情页
+- 审批中心
+- 设置页 / Agent 地址配置
+- Android / Web / 桌面端 runner 已补齐
+- 已适配浏览器跨域访问本地 Agent
+
+## 当前支持的端
+
+- `Go Agent`：Windows、Linux、macOS (go原生支持多端)
+- `客户端支持平台`：Windows、Linux、macOS、iOS、Android、Web
+- `iOS SwiftUI App`：iOS
+- `Flutter App`：Windows、Linux、macOS、iOS、Android、Web
+
+## 当前已验证可用的端
+
+- `Go Agent`（macOS）
+- `iOS SwiftUI App`
+- `Flutter Web (Chrome)`
+- `Flutter Android`（MuMu 模拟器）
+
 ## 当前状态
 
 项目已经能跑通真实链路：
@@ -76,6 +101,8 @@ iOS App
 - Agent 可以连上本机 Codex CLI
 - `dashboard` API 能返回真实会话数据
 - iOS 客户端可以消费真实数据并进行操作
+- Flutter Web 客户端可以通过浏览器访问本地 Agent
+- Flutter Android 客户端可以在模拟器中访问局域网 Agent
 
 当前还没有做的部分：
 
@@ -90,13 +117,14 @@ iOS App
 
 ### 1. 环境要求
 
-- macOS
+- Windows / Linux / macOS（运行 Agent）
 - 已安装并可用的 `codex` CLI
 - 已完成 Codex 登录
 - Go 1.26+
-- Xcode（用于运行 iOS App）
+- Xcode（仅在运行 iOS App 时需要）
+- Flutter（仅在运行 Flutter App 时需要）
 
-### 2. 启动 Mac Agent
+### 2. 启动 Go Agent
 
 在仓库根目录执行：
 
@@ -117,7 +145,58 @@ go run ./cmd/codexflow-agent
 - `CODEXFLOW_REFRESH_INTERVAL`
 - `CODEXFLOW_STATE_DB_PATH`
 
-### 3. 验证 Agent 是否正常
+如果你的 `codex` 不在系统 `PATH` 里，可以显式指定它：
+
+```bash
+CODEXFLOW_CODEX_PATH=/path/to/codex go run ./cmd/codexflow-agent
+```
+
+例如：
+
+- macOS / Linux：`CODEXFLOW_CODEX_PATH=/usr/local/bin/codex`
+- Windows：`CODEXFLOW_CODEX_PATH=C:\path\to\codex.exe`
+
+如果你想先编译再运行：
+
+```bash
+go build -o codexflow-agent ./cmd/codexflow-agent
+./codexflow-agent
+```
+
+在 Windows 上可执行文件会是：
+
+```text
+codexflow-agent.exe
+```
+
+### 3. Agent 多端使用方式
+
+推荐的部署方式是：
+
+1. 在安装了 `codex` CLI 的那台主机上运行 `Go Agent`
+2. 让 Agent 暴露一个本机或局域网可访问的 HTTP 地址
+3. 用 iOS / Android / Web / 桌面客户端去连接这个地址
+
+同机使用：
+
+```text
+Agent: 127.0.0.1:4318
+Client: http://127.0.0.1:4318
+```
+
+跨设备使用：
+
+```bash
+CODEXFLOW_LISTEN_ADDR=0.0.0.0:4318 go run ./cmd/codexflow-agent
+```
+
+然后在客户端里填写运行 Agent 那台机器的局域网 IP，例如：
+
+```text
+http://192.168.1.10:4318
+```
+
+### 4. 验证 Agent 是否正常
 
 ```bash
 curl http://127.0.0.1:4318/healthz
@@ -126,7 +205,7 @@ curl http://127.0.0.1:4318/api/v1/dashboard
 
 如果正常，你会拿到健康检查结果和真实会话列表。
 
-### 4. 运行 iOS App
+### 5. 运行 iOS App
 
 用 Xcode 打开：
 
@@ -136,7 +215,30 @@ ios/CodexFlow/CodexFlow.xcodeproj
 
 然后运行 `CodexFlow` target。
 
-### 5. 在 App 里配置 Agent 地址
+### 6. 运行 Flutter App
+
+Flutter 项目目录：
+
+```text
+flutter/codexflow
+```
+
+在该目录执行：
+
+```bash
+cd flutter/codexflow
+flutter pub get
+flutter run
+```
+
+如果要指定设备，例如：
+
+```bash
+flutter run -d chrome
+flutter run -d emulator-5554
+```
+
+### 7. 在 App 里配置 Agent 地址
 
 如果是同一台 Mac 上跑模拟器：
 
@@ -144,7 +246,7 @@ ios/CodexFlow/CodexFlow.xcodeproj
 http://127.0.0.1:4318
 ```
 
-如果是 iPhone 真机联调，建议让 Agent 监听局域网：
+如果是 `iPhone 真机`、`Android 模拟器`、`Android 真机`，或者你要给其他设备访问，建议让 Agent 监听局域网：
 
 ```bash
 CODEXFLOW_LISTEN_ADDR=0.0.0.0:4318 go run ./cmd/codexflow-agent
@@ -155,6 +257,12 @@ CODEXFLOW_LISTEN_ADDR=0.0.0.0:4318 go run ./cmd/codexflow-agent
 ```text
 http://192.168.1.10:4318
 ```
+
+补充说明：
+
+- `Flutter Web / Chrome`：如果页面和 Agent 在同一台 Mac 上，通常可直接使用 `http://127.0.0.1:4318`
+- `Android 模拟器 / 真机`：不要填 `127.0.0.1`，要填你 Mac 的局域网 IP
+- 当前 Agent 已加入浏览器跨域支持，Flutter Web 可以直接访问本地 Agent
 
 ## 基本使用方式
 
@@ -186,17 +294,20 @@ http://192.168.1.10:4318
 ## 仓库结构
 
 ```text
-cmd/codexflow-agent        Go 启动入口
+cmd/codexflow-agent        Go Agent 启动入口
 internal/codex            Codex app-server 协议适配
 internal/runtime          会话管理、统计、审批编排
 internal/httpapi          HTTP API 与 SSE
 internal/store            本地状态存储
 ios/CodexFlow             iOS SwiftUI 客户端
+flutter/codexflow         Flutter 跨平台客户端
 docs                      架构与路线文档
 assets                    README 截图资源
 ```
 
 ## 截图
+
+### iOS
 
 <table>
   <tr>
@@ -221,13 +332,19 @@ assets                    README 截图资源
   </tr>
 </table>
 
-## 说明
+### Android
 
-这个项目现在更接近一个可运行的产品初版，而不是最终版。
+<table>
+  <tr>
+    <td><img src="assets/screenshot_android_01.png" alt="Android Screenshot 01" width="240"></td>
+    <td><img src="assets/screenshot_android_02.png" alt="Android Screenshot 02" width="240"></td>
+  </tr>
+</table>
+
+## 说明
 
 下一阶段计划：
 
-- 前端flutter版本重新
 - SSE 实时刷新
 - macOS Launcher
 - 局域网外的安全 relay
