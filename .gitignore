@@ -33,3 +33,10 @@ coverage.out
 .codexflow/
 codexflow-state.db
 codexflow-state.db-*
+
+# Local deployment artifacts
+bin/
+deploy/
+logs/
+release/
+web-dist/
